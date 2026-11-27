@@ -1,84 +1,168 @@
 ﻿using System.Reflection;
 using System.Security.Cryptography;
-using System.Text.Json;
 
 namespace MHPatcher
 {
     internal class Program
     {
-        enum Mode
+        const string ExeHash32 = "AABFC231A0BA96229BCAC1C931EAEA777B7470EC";
+        const string ExeHash64 = "6DC9BCDB145F98E5C2D7A1F7E25AEB75507A9D1A";
+        const string PatchedExeName = "MarvelHeroesOmegaPatched.exe";
+
+        static int Main(string[] args)
         {
-            x32,
-            x64
+            string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "?";
+            Console.WriteLine($"MHPatcher {version}");
+            Console.WriteLine();
+
+            int result;
+            try
+            {
+                result = Run(args);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Unexpected error: {e.Message}");
+                result = 1;
+            }
+
+            Pause();
+            return result;
         }
 
-        static void Main(string[] args)
+        static int Run(string[] args)
         {
-            const string ExeHash32 = "AABFC231A0BA96229BCAC1C931EAEA777B7470EC";
-            const string ExeHash64 = "6DC9BCDB145F98E5C2D7A1F7E25AEB75507A9D1A";
-
             if (args.Length < 1)
             {
-                Console.WriteLine("Drag and drop a Marvel Heroes executable on this tool to patch it.");
-                Console.ReadLine();
-                return;
+                Console.WriteLine("Drag and drop MarvelHeroesOmega.exe onto MHPatcher.exe to patch it.");
+                return 1;
             }
 
-            string filePath = args[0];
-
-            Console.WriteLine($"Patching {filePath}...");
+            string filePath = Path.GetFullPath(args[0]);
             if (File.Exists(filePath) == false)
             {
-                Console.WriteLine($"{filePath} is not a valid file path");
-                return;
+                Console.WriteLine($"File not found: {filePath}");
+                return 1;
             }
 
+            Console.WriteLine($"Reading {filePath}...");
             byte[] data = File.ReadAllBytes(filePath);
             string hash = Convert.ToHexString(SHA1.HashData(data));
 
-            Mode mode;
+            string patchesFile;
             if (hash == ExeHash32)
-                mode = Mode.x32;
+                patchesFile = "Patches32.json";
             else if (hash == ExeHash64)
-                mode = Mode.x64;
+                patchesFile = "Patches64.json";
             else
             {
-                Console.WriteLine($"Invalid executable! Make sure you are trying to patch an executable of version 1.52.0.1700 (Steam).");
-                Console.ReadLine();
-                return;
+                Console.WriteLine("Unsupported executable. Only the unmodified MarvelHeroesOmega.exe from version 1.52.0.1700 (Steam) is supported.");
+                Console.WriteLine($"SHA-1: {hash}");
+                return 1;
             }
 
-            string root = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            string patchesFile = mode == Mode.x32 ? "Patches32.json" : "Patches64.json";
-            Patch[] patches = JsonSerializer.Deserialize<Patch[]>(File.ReadAllText(Path.Combine(root, patchesFile)));
+            Console.WriteLine($"Detected {(patchesFile == "Patches32.json" ? "Win32" : "Win64")} client.");
 
-            foreach (var patch in patches)
-                ApplyPatch(data, patch);
+            // AppContext.BaseDirectory works for single-file builds, where Assembly.Location is empty.
+            string patchesPath = Path.Combine(AppContext.BaseDirectory, patchesFile);
+            if (File.Exists(patchesPath) == false)
+            {
+                Console.WriteLine($"Patch file not found: {patchesPath}");
+                Console.WriteLine($"Keep {patchesFile} in the same folder as MHPatcher.exe.");
+                return 1;
+            }
 
-            string patchedExePath = Path.Combine(Path.GetDirectoryName(filePath), "MarvelHeroesOmegaPatched.exe");
+            Patch[] patches;
+            try
+            {
+                patches = Patcher.Load(File.ReadAllText(patchesPath));
+            }
+            catch (Exception e) when (e is System.Text.Json.JsonException || e is InvalidDataException)
+            {
+                Console.WriteLine($"Could not read {patchesFile}: {e.Message}");
+                return 1;
+            }
+
+            if (patches.Any(p => p.IsEnabled) == false && SelectPatches(patches) == false)
+                return 1;
+
+            List<string> errors = Patcher.Validate(patches, data.Length);
+            if (errors.Count > 0)
+            {
+                Console.WriteLine("No changes made. Fix these problems first:");
+                foreach (string error in errors)
+                    Console.WriteLine($"  - {error}");
+                return 1;
+            }
+
+            foreach (Patch patch in patches.Where(p => p.IsEnabled))
+                Console.WriteLine($"Applying \"{patch.Name}\"...");
+
+            Patcher.Apply(data, patches);
+
+            string patchedExePath = Path.Combine(Path.GetDirectoryName(filePath), PatchedExeName);
             Console.WriteLine($"Saving patched executable to {patchedExePath}...");
             File.WriteAllBytes(patchedExePath, data);
 
-            Console.WriteLine("Finished");
-            Console.ReadLine();
+            Console.WriteLine("Finished. Your original executable was not changed.");
+            return 0;
         }
 
-        static void ApplyPatch(byte[] data, Patch patch)
+        /// <summary>
+        /// Asks the user which patches to apply when none are enabled in the patch file.
+        /// </summary>
+        static bool SelectPatches(Patch[] patches)
         {
-            if (patch.IsEnabled == false) return;
-
-            Console.WriteLine($"Applying \"{patch.Name}\"...");
-            int offset = Convert.ToInt32(patch.Offset, 16);
-            byte[] patchData = Convert.FromHexString(patch.Data);
-
-            if (offset < 0 || offset > data.Length)
+            List<PatchChoice> choices = Patcher.GetChoices(patches);
+            if (choices.Count == 0)
             {
-                Console.WriteLine($"Patch offset 0x{offset:X} is out of range (max: 0x{data.Length - 1:X})");
-                return;
+                Console.WriteLine("The patch file contains no patches.");
+                return false;
             }
 
-            for (int i = 0; i < patchData.Length; i++)
-                data[offset + i] = patchData[i];
+            Console.WriteLine("Available patches:");
+            for (int i = 0; i < choices.Count; i++)
+            {
+                string parts = choices[i].Patches.Count > 1 ? $" ({choices[i].Patches.Count} parts)" : "";
+                Console.WriteLine($"  {i + 1}. {choices[i].Name}{parts}");
+            }
+
+            while (true)
+            {
+                Console.Write("Enter the numbers of the patches to apply, separated by commas: ");
+                string input = Console.ReadLine();
+                if (input == null)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("No patches selected.");
+                    return false;
+                }
+
+                List<int> selection = Patcher.ParseSelection(input, choices.Count);
+                if (selection == null)
+                {
+                    Console.WriteLine($"Enter one or more numbers from 1 to {choices.Count}.");
+                    continue;
+                }
+
+                foreach (int index in selection)
+                {
+                    foreach (Patch patch in choices[index].Patches)
+                        patch.IsEnabled = true;
+                }
+
+                return true;
+            }
+        }
+
+        static void Pause()
+        {
+            if (Console.IsInputRedirected)
+                return;
+
+            Console.WriteLine();
+            Console.WriteLine("Press Enter to exit.");
+            Console.ReadLine();
         }
     }
 }

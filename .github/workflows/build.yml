@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Test
+        run: dotnet test MHPatcher.Tests
+
+      - name: Set version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish (win-x64, self-contained, single file)
+        run: dotnet publish MHPatcher -c Release -o out/MHPatcher -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Package
+        shell: bash
+        run: |
+          cp LICENSE README.md CHANGELOG.md out/MHPatcher/
+          cd out
+          zip -r "MHPatcher-${{ steps.version.outputs.version }}-win-x64.zip" MHPatcher
+          sha256sum MHPatcher-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MHPatcher-${{ steps.version.outputs.version }}-win-x64
+          path: |
+            out/MHPatcher-*.zip
+            out/SHA256SUMS.txt
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/MHPatcher-*.zip out/SHA256SUMS.txt \
+            --title "MHPatcher $GITHUB_REF_NAME" \
+            --notes "See CHANGELOG.md for changes. Download the zip, extract it, and drag MarvelHeroesOmega.exe onto MHPatcher.exe."

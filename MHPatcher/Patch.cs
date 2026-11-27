@@ -2,17 +2,17 @@
 {
     public class Patch
     {
-        public string Name { get; }
-        public bool IsEnabled { get; }
-        public string Offset { get; }
-        public string Data { get; }
+        public string Name { get; init; }
+        public bool IsEnabled { get; set; }
+        public string Offset { get; init; }
+        public string Data { get; init; }
 
-        public Patch(string name, bool isEnabled, string offset, string data)
-        {
-            Name = name;
-            IsEnabled = isEnabled;
-            Offset = offset;
-            Data = data;
-        }
+        /// <summary>
+        /// Optional. Patches that share a group depend on each other and must be applied together.
+        /// </summary>
+        public string Group { get; init; }
+
+        public int OffsetValue => Convert.ToInt32(Offset, 16);
+        public byte[] DataBytes => Convert.FromHexString(Data);
     }
 }
