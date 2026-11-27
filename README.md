@@ -30,20 +30,50 @@ Windows SmartScreen may warn that the app is from an unknown publisher, because 
 
 | Patch | What it does |
 | --- | --- |
-| Fix Session Token Encryption by TobiX | Fixes the session token encryption issue. |
-| Bypass Session Token Encryption Error by FF_Lowthor | Skips the session token encryption error. |
-| Disable Screenshots When Sending Bug Report | Stops the client from attaching screenshots to bug reports. |
-| Custom ports (6 parts) | Lets you choose the SiteConfig and auth server ports and use HTTP for auth. Always applied as one patch. |
+| Fix Session Token Encryption by TobiX | Fixes the session token encryption error at its cause. Use this one. |
+| Bypass Session Token Encryption Error by FF_Lowthor | Ignores the session token encryption error instead of fixing it. Only use it if the TobiX fix doesn't work for you. You don't need both. |
+| Disable Screenshots When Sending Bug Report | Stops the client from attaching a screenshot to bug reports. |
+| Custom ports (6 parts) | Adds launch options to set the SiteConfig port, the auth server port, and HTTP for auth. Always applied as one patch. |
 
-#### Custom ports options
+#### Session token patches
 
-After you apply the custom ports patch, add these options to the patched client's command line:
+When the client logs in, it encrypts the session token with AES-256 through the Windows CryptoAPI. The client builds the key header but leaves 2 bytes of it uninitialized. When those bytes hold garbage, Windows rejects the key and login fails with an encryption error.
 
-| Option | Effect |
-| --- | --- |
-| `-siteconfigport=<port>` | Port used to request SiteConfig. |
-| `-authport=<port>` | Auth server port. Without it, the client uses the port from SiteConfig instead of always using 443. |
-| `-authhttp` | Use HTTP for auth requests. Without it, auth requests use HTTPS. |
+- **TobiX's fix** writes the whole 4-byte header (`08 02 00 00`) in one instruction, so the stray bytes are always zero.
+- **FF_Lowthor's bypass** turns the error check after encryption into an unconditional jump. The client continues even if encryption failed.
+
+#### Custom ports
+
+The unpatched client always requests SiteConfig on port 80, always connects to the auth server on port 443, and always uses HTTPS for auth. The custom ports patch lets you change all three when you start the client.
+
+Add these options to the patched client's command line:
+
+| Option | Effect | If you leave it out |
+| --- | --- | --- |
+| `-siteconfigport=<port>` | Port used to request SiteConfig. Must be a number from 1 to 65535. | Port 80. An invalid value also falls back to 80. |
+| `-authport=<port>` | Auth server port. The value is used as-is, so check it for typos. | The port from SiteConfig. The unpatched client always used 443. |
+| `-authhttp` | Use plain HTTP for auth requests. | HTTPS. |
+
+Example:
+
+```
+MarvelHeroesOmegaPatched.exe -robocopy -nosteam -siteconfigport=8080 -authport=8080 -authhttp
+```
+
+Ports are read every time the client starts, so you can change them without patching again.
+
+How it works: the client's `.text` section ends with unused zero bytes. The patch writes three small routines there and extends the section's size in the PE header to include them. It then replaces four spots in the original code with calls to those routines:
+
+| Part | Offset | Change |
+| --- | --- | --- |
+| Header | `0x000002B0` | Extends `.text` VirtualSize from `0x1DB9E0F` to `0x1DB9F22` so the new routines are loaded. |
+| SiteConfig request | `0x018ED01B` | Calls a routine that reads `-siteconfigport=` and uses it in place of the hard-coded port 80. |
+| AuthServerPort | `0x018F085C` | Calls a routine that reads `-authhttp` and `-authport=`, then skips the code that forced port 443. |
+| Auth request 2 | `0x019AD4BD` | Calls a routine that returns "use HTTPS" unless `-authhttp` was given. |
+| Auth request 1 | `0x019B0828` | Same as auth request 2, for the other auth request. |
+| Routines | `0x01DBA210` | The 273 bytes of new code and the option-name strings. |
+
+The routines read the options through the client's own command-line functions. The parts depend on each other, so the patcher only applies them as a set.
 
 ### Win32 (`Patches32.json`)
 
